@@ -16,12 +16,6 @@
                     </keep-alive>
                     <component v-if="!$route?.meta?.keepAlive" :is="Component"></component>
                 </router-view>
-
-<!--                <div class="text-caption text-grey text-center mt-8 mb-4">-->
-<!--                    Powered by-->
-<!--                    <a href="https://github.com/sigoden/dufs" target="_blank" rel="noopener noreferrer" style="color:unset">dufs</a> v{{ dufsVersion }} &-->
-<!--                    <a href="https://github.com/TransparentLC/dufs-material-assets" target="_blank" rel="noopener noreferrer" style="color:unset">dufs-material-assets</a>-->
-<!--                </div>-->
             </v-container>
         </v-main>
     </v-app>
