@@ -1,25 +1,93 @@
 <template>
     <Teleport to="#app-bar-append">
-        <v-tooltip
-            v-if="filelist.allow_upload"
-            :text="t('titleUploadFile')"
+        <v-menu
+            open-delay="0"
+            open-on-focus
+            open-on-hover
+            :close-on-content-click="false"
         >
-            <template v-slot:activator="{ props }">
-                <v-btn
-                    v-bind="props"
-                    variant="text"
-                    icon="$mdiUpload"
-                    @click="uploadFilesClick"
-                ></v-btn>
-                <input
-                    id="upload"
-                    class="d-none"
-                    type="file"
-                    multiple
-                    @change="e => uploadFilesSelectResolve(e.target.files)"
+            <template v-slot:activator="{ props: menu }">
+                <v-tooltip
+                    v-if="filelist.allow_upload"
+                    :text="t('titleUploadFile')"
                 >
+                    <template v-slot:activator="{ props: tooltip }">
+                        <v-btn
+                            v-bind="mergeProps(menu, tooltip)"
+                            variant="text"
+                            icon="$mdiUpload"
+                            @click="uploadFilesClick"
+                        >
+                            <v-badge
+                                v-if="uploadlist.filter(e => !e.uploaded && !e.aborted && !e.fail).length"
+                                :content="uploadlist.filter(e => !e.uploaded && !e.aborted && !e.fail).length"
+                            >
+                                <v-icon icon="$mdiUpload"></v-icon>
+                            </v-badge>
+                            <v-icon v-else icon="$mdiUpload"></v-icon>
+                        </v-btn>
+                        <input
+                            id="upload"
+                            class="d-none"
+                            type="file"
+                            multiple
+                            @change="e => uploadFilesSelectResolve(e.target.files)"
+                        >
+                    </template>
+                </v-tooltip>
             </template>
-        </v-tooltip>
+            <v-list
+                v-show="uploadlist.length"
+                lines="two"
+                item-props
+                width="480"
+                max-height="540"
+            >
+                <v-list-item v-for="e, i in uploadlist" v-ripple>
+                    <template v-slot:prepend>
+                        <v-avatar :color="getColorFromExt(getExt(e.file.name))">
+                            <v-icon
+                                color="white"
+                                :icon="getIconFromExt(getExt(e.file.name))"
+                                class="flex-shrink-0"
+                            ></v-icon>
+                        </v-avatar>
+                    </template>
+                    <v-list-item-title>
+                        <span :title="e.file.name">{{ e.file.name }}</span>
+                    </v-list-item-title>
+                    <v-list-item-subtitle style="opacity:1">
+                        <span v-if="e.uploaded" class="text-success">{{ t('dialogUploadSucceed') }}</span>
+                        <span v-else-if="e.fail" class="text-error">{{ t(e.fail) }}</span>
+                        <span v-else-if="!e.xhr" style="opacity:var(--v-list-item-subtitle-opacity, var(--v-medium-emphasis-opacity))">{{ t('dialogUploadPending') }}</span>
+                        <template v-else>
+                            <span v-if="display.smAndUp.value" style="opacity:var(--v-list-item-subtitle-opacity, var(--v-medium-emphasis-opacity))">{{ formatSize(e.loaded) }} / {{ formatSize(e.file.size) }} | {{ `${Math.round(e.loaded / e.file.size * 1e4) / 1e2}%` }} | {{ formatSize(Math.round(e.speed)) }}/s</span>
+                            <span v-else style="opacity:var(--v-list-item-subtitle-opacity, var(--v-medium-emphasis-opacity))">{{ formatSize(e.loaded) }} / {{ formatSize(e.file.size) }}</span>
+                            <v-progress-linear
+                                :model-value="e.loaded / e.file.size * 100"
+                                color="primary"
+                                rounded
+                            ></v-progress-linear>
+                        </template>
+                    </v-list-item-subtitle>
+                    <template v-slot:append>
+                        <v-btn
+                            color="grey"
+                            icon="$mdiClose"
+                            variant="text"
+                            class="ml-4"
+                            @click="() => {
+                                if (!e.uploaded) {
+                                    e.aborted = true;
+                                    if (e.xhr) e.xhr.abort();
+                                }
+                                uploadlist.splice(i, 1);
+                            }"
+                        ></v-btn>
+                    </template>
+                </v-list-item>
+            </v-list>
+        </v-menu>
         <v-tooltip
             v-if="filelist.allow_upload"
             :text="t('titleCreateFolder')"
@@ -44,6 +112,20 @@
                     icon="$mdiFolderDownload"
                     :href="currentPath + '?zip'"
                     download
+                ></v-btn>
+            </template>
+        </v-tooltip>
+
+        <v-tooltip
+            v-if="filelist.auth"
+            :text="filelist.user ? t('titleLogout', [filelist.user]) : t('titleLogin')"
+        >
+            <template v-slot:activator="{ props }">
+                <v-btn
+                    v-bind="props"
+                    variant="text"
+                    :icon="filelist.user ? '$mdiLogout' : '$mdiLogin'"
+                    @click="filelist.user ? logout() : login()"
                 ></v-btn>
             </template>
         </v-tooltip>
@@ -625,14 +707,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch, nextTick, getCurrentInstance } from 'vue';
+import { ref, computed, onMounted, watch, nextTick, getCurrentInstance, mergeProps, reactive } from 'vue';
 import { useRoute } from 'vue-router';
 import { useDisplay } from 'vuetify';
 import { marked } from 'marked';
 import prism from 'prismjs';
-import asyncPool from 'tiny-async-pool';
 import { useI18n } from 'petite-vue-i18n';
 import * as jsmediatags from '../mami-chan/index.js';
+import Uploader from '../uploader.js';
 import { getExt, getIconFromExt, getColorFromExt, formatSize, formatTimestamp, pathPrefix, removePrefix, removeSuffix, debounce, codeLanguageTable } from '../common.js';
 
 const { $dialog, $toast } = getCurrentInstance().appContext.config.globalProperties;
@@ -756,11 +838,7 @@ const updateFilelist = async () => {
         // Don't show skeleton if loading time is less than 150ms
         const st = setTimeout(() => filelistSkeleton.value = true, 150);
         // console.time('Load filelist');
-        filelist.value = await dufsfetch(`${__IS_PROD__ ? `${location.protocol}//${location.host}` : 'http://localhost:5000'}${currentPath.value}?${sp}`)
-            .then(r => {
-                if (r.status >= 400) throw new Error(r.statusText);
-                return r.json();
-            });
+        filelist.value = await dufsfetch(`${currentPath.value}?${sp}`).then(r => r.json());
         // console.timeEnd('Load filelist');
         filelistSkeleton.value = false;
         clearTimeout(st);
@@ -800,11 +878,7 @@ watch(previewDialog, () => {
 const updateReadme = async () => {
     if (!readmeItem.value) return;
     const st = setTimeout(() => readmeSkeleton.value = true, 150);
-    const r = await dufsfetch(readmeItem.value.fullpath)
-        .then(r => {
-            if (r.status >= 400) throw new Error(r.statusText);
-            return r.text();
-        });
+    const r = await dufsfetch(`${readmeItem.value.fullpath}`).then(r => r.text());
     readmeSkeleton.value = false;
     clearTimeout(st);
     if (readmeItem.value.ext === 'md') {
@@ -819,11 +893,7 @@ const updateReadme = async () => {
 const updatePreviewContent = async () => {
     if (!previewItem.value.fullpath) return;
     const st = setTimeout(() => previewSkeleton.value = true, 150);
-    const r = await dufsfetch(previewItem.value.fullpath)
-        .then(r => {
-            if (r.status >= 400) throw new Error(r.statusText);
-            return r.text();
-        });
+    const r = await dufsfetch(previewItem.value.fullpath).then(r => r.text());;
     previewSkeleton.value = false;
     clearTimeout(st);
     if (previewItem.value.ext === 'md') {
@@ -842,14 +912,31 @@ const updatePreviewContent = async () => {
 const updateEditContent = async () => {
     if (!editItem.value.fullpath) return;
     const st = setTimeout(() => editSkeleton.value = true, 150);
-    const r = await dufsfetch(editItem.value.fullpath)
-        .then(r => {
-            if (r.status >= 400) throw new Error(r.statusText);
-            return r.text();
-        });
+    const r = await dufsfetch(editItem.value.fullpath).then(r => r.text());
     editSkeleton.value = false;
     clearTimeout(st);
     editContent.value = r;
+};
+
+// FIXME: Vite的proxy server似乎不能处理非标准HTTP method（直接返回400，甚至没有响应头）
+// 但是这两个应该没有问题
+
+// FIXME: 在Firefox上，弹出登录对话框后点击取消或什么都不填就确认多次，之后不会再弹出登录对话框，除非重启浏览器或Ctrl+F5
+const login = async () => {
+    await dufsfetch(`${currentPath.value}`, { method: 'CHECKAUTH' });
+    await updateFilelist();
+};
+
+const logout = async () => {
+    if (!(await $dialog.promises.confirm(t('dialogLogout', [filelist.value.user]), t('actionLogout')))) return;
+    await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest;
+        xhr.onload = resolve;
+        xhr.onerror = reject;
+        xhr.open('LOGOUT', `${currentPath.value}`, true, filelist.value.user);
+        xhr.send();
+    });
+    await updateFilelist();
 };
 
 const saveEditContent = async () => {
@@ -861,17 +948,14 @@ const saveEditContent = async () => {
             method: 'PUT',
             body: editContent.value,
         },
-    )
-        .then(r => {
-            if (r.status >= 400) throw new Error(r.statusText);
-            return r.text();
-        });
+    ).then(r => r.text());
     $toast.success(t('toastSaveEdit', [editItem.value.name]));
     await updateFilelist();
 };
 
 onMounted(updateFilelist);
 onMounted(updateReadme);
+
 watch(currentPath, updateFilelist);
 watch(search, debounce(updateFilelist, 250));
 watch(readmeItem, updateReadme);
@@ -881,14 +965,7 @@ watch(readmeItem, updateReadme);
  */
 const deleteFile = async e => {
     if (!(await $dialog.promises.confirm(t('dialogDeleteConfirm', [e.name]), t(e.is_dir ? 'actionDeleteFolder' : 'actionDeleteFile')))) return;
-    await dufsfetch(
-        e.fullpath,
-        {
-            method: 'DELETE',
-        }
-    ).then(r => {
-        if (r.status >= 400) throw new Error(r.statusText);
-    });
+    await dufsfetch(e.fullpath, { method: 'DELETE' });
     await updateFilelist();
 };
 
@@ -906,42 +983,39 @@ const moveFile = async e => {
                 'Destination': encodeURI(currentPath.value + path),
             },
         }
-    ).then(r => {
-        if (r.status >= 400) throw new Error(r.statusText);
-    });
+    );
     $toast.success(t(e.is_dir ? 'toastMoveFolder' : 'toastMoveFile'));
     await updateFilelist();
 };
 
 /**
- * @param {[String, File][]} files
+ * @type {import('vue').Ref<Uploader[]>}
  */
-const uploadFiles = async files => {
-    for await (const _ of asyncPool(5, files, ([path, file]) => dufsfetch(
-        currentPath.value + path,
-        {
-            method: 'PUT',
-            body: file,
-        },
-    ))) {
+const uploadlist = ref([]);
 
-    }
-    $toast.success(t('toastUploadFile', [files.length], files.length));
-    await updateFilelist();
-};
 const uploadFilesSelectResolve = ref(() => {});
 const uploadFilesClick = async () => {
-    let t;
     /** @type {File[]} */
     const files = Array.from(await new Promise(resolve => {
         document.getElementById('upload').value = null;
         document.getElementById('upload').click();
         uploadFilesSelectResolve.value = resolve;
-        t = setTimeout(() => resolve([]), 5 * 60 * 1000);
     }));
-    clearTimeout(t);
     if (!files.length) return;
-    await uploadFiles(files.map(e => [e.name, e]));
+    files
+        .map(file => {
+            const cp = currentPath.value;
+            return new Uploader(
+                cp + file.name,
+                file,
+                () => currentPath.value === cp && updateFilelist(),
+            );
+        })
+        .forEach(e => {
+            const r = reactive(e);
+            uploadlist.value.push(r);
+            r.upload();
+        });
 };
 document.body.addEventListener('dragenter', e => e.preventDefault());
 document.body.addEventListener('dragover', e => e.preventDefault());
@@ -974,20 +1048,26 @@ document.body.addEventListener('drop', async e => {
             }
         ))
     ) return;
-    await uploadFiles(files);
+    files
+        .map(([path, file]) => {
+            const cp = currentPath.value;
+            return new Uploader(
+                cp + path,
+                file,
+                () => currentPath.value === cp && updateFilelist(),
+            );
+        })
+        .forEach(e => {
+            const r = reactive(e);
+            uploadlist.value.push(r);
+            r.upload();
+        });
 });
 
 const createFolder = async () => {
     const path = await $dialog.promises.prompt(t('dialogCreateFolderLabel'), t('titleCreateFolder'));
     if (!path) return;
-    await dufsfetch(
-        currentPath.value + path,
-        {
-            method: 'MKCOL',
-        }
-    ).then(r => {
-        if (r.status >= 400) throw new Error(r.statusText);
-    });
+    await dufsfetch(currentPath.value + path, { method: 'MKCOL' });
     $toast.success(t('toastCreateFolder'));
     await updateFilelist();
 };
@@ -1056,7 +1136,7 @@ const updateAudioTags = async e => {
          * }}
          */
         const tags = await new Promise(
-            (resolve, reject) => (new jsmediatags.Reader(`${__IS_PROD__ ? `${location.protocol}//${location.host}` : 'http://localhost:5000'}${e.fullpath}`))
+            (resolve, reject) => (new jsmediatags.Reader(`${location.protocol}//${location.host}${e.fullpath}`))
                 .setTagsToRead(['title', 'artist', 'album', 'picture'])
                 .read({
                     onSuccess: e => resolve(e.tags),
